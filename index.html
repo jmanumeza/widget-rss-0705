@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Widget RSS</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #1b2430;
+    --muted: #5f6b7a;
+    --line: #dfe3e8;
+    --accent: #1f5fbf;
+    --accent-soft: #e6eefb;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12171e; --panel: #1a212b; --ink: #e8ecf1; --muted: #98a3b1;
+      --line: #2b3441; --accent: #7fb0ff; --accent-soft: #223149;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12171e; --panel: #1a212b; --ink: #e8ecf1; --muted: #98a3b1;
+    --line: #2b3441; --accent: #7fb0ff; --accent-soft: #223149;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 12px;
+  }
+
+  .widget {
+    display: flex; flex-direction: column;
+    height: 100%; min-height: 280px; max-width: 640px; margin: 0 auto;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+  .status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: #2e9d62; }
+  .dot.error { background: #c9473b; }
+
+  .controls { display: flex; gap: 6px; }
+  button {
+    font: inherit; font-size: 12px; color: var(--ink);
+    background: transparent; border: 1px solid var(--line); border-radius: 6px;
+    padding: 3px 9px; cursor: pointer;
+  }
+  button:hover { background: var(--accent-soft); }
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .viewport { position: relative; flex: 1; overflow: hidden; }
+  .viewport.static { overflow-y: auto; }
+  .track { will-change: transform; }
+
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  li a {
+    font-family: Charter, "Iowan Old Style", Georgia, serif;
+    font-size: 17px; line-height: 1.3; font-weight: 600;
+    color: var(--ink); text-decoration: none;
+  }
+  li a:hover { color: var(--accent); text-decoration: underline; }
+  .meta { margin-top: 3px; font-size: 12px; color: var(--muted); }
+  .post-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+  .post-head a { font-family: inherit; font-size: 14px; font-weight: 650; color: var(--accent); }
+  .post-head time { font-size: 12px; color: var(--muted); }
+  .post-body { margin: 4px 0 0; font-size: 15px; white-space: pre-line; overflow-wrap: anywhere; max-width: 70ch; }
+  .snippet { margin: 5px 0 0; font-size: 14px; color: var(--muted); max-width: 70ch; }
+
+  .message { padding: 28px 18px; text-align: center; color: var(--muted); }
+  .message strong { display: block; color: var(--ink); margin-bottom: 4px; }
+
+  @media (prefers-reduced-motion: reduce) { .track { transform: none !important; } }
+</style>
+</head>
+<body>
+
+<section class="widget" aria-label="Noticias RSS">
+  <header>
+    <h1 id="title">Noticias</h1>
+    <div class="status">
+      <span class="dot" id="dot"></span><span id="status">Cargando…</span>
+      <div class="controls">
+        <button id="pause" type="button" aria-pressed="false">Pausar</button>
+        <button id="refresh" type="button">Actualizar</button>
+      </div>
+    </div>
+  </header>
+  <div class="viewport" id="viewport">
+    <div class="track" id="track"></div>
+  </div>
+</section>
+
+<script>
+/* ============ CONFIGURACIÓN ============
+   Puedes editar estos valores o sobrescribirlos con parámetros en la URL:
+   rss-widget.html?feed=URL1,URL2&refresh=10&max=25&speed=20&title=Mi%20titulo&theme=dark
+*/
+const CONFIG = {
+  title: "#seminv705 · Iztasocial",
+  feeds: ["https://iztasocial.site/tags/seminv705.rss"],
+  refreshMinutes: 10,   // cada cuánto se vuelve a leer el feed
+  maxItems: 20,         // máximo de entradas mostradas
+  maxChars: 420,        // largo máximo del texto de cada publicación
+  scrollSpeed: 22,      // píxeles por segundo (0 = sin desplazamiento automático)
+  showSnippet: true,
+  // Si el feed no permite CORS, se prueban estos proxys en orden.
+  // Para producción conviene usar uno propio.
+  proxies: [
+    u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+    u => "https://corsproxy.io/?" + encodeURIComponent(u)
+  ]
+};
+
+const q = new URLSearchParams(location.search);
+if (q.get("feed"))    CONFIG.feeds = q.get("feed").split(",").map(s => s.trim()).filter(Boolean);
+if (q.get("refresh")) CONFIG.refreshMinutes = Math.max(1, +q.get("refresh") || CONFIG.refreshMinutes);
+if (q.get("max"))     CONFIG.maxItems = Math.max(1, +q.get("max") || CONFIG.maxItems);
+if (q.get("speed"))   CONFIG.scrollSpeed = Math.max(0, +q.get("speed") || 0);
+if (q.get("title"))   CONFIG.title = q.get("title");
+if (q.get("theme"))   document.documentElement.dataset.theme = q.get("theme");
+
+/* ============ ELEMENTOS ============ */
+const $ = id => document.getElementById(id);
+const track = $("track"), viewport = $("viewport");
+$("title").textContent = CONFIG.title;
+
+let userPaused = false, hoverPaused = false;
+let offset = 0, listHeight = 0, lastTs = 0, timer = null;
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ============ OBTENER Y ANALIZAR FEEDS ============ */
+async function fetchText(url) {
+  const attempts = [url, ...CONFIG.proxies.map(p => p(url))];
+  let lastErr;
+  for (const u of attempts) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 12000);
+      const res = await fetch(u, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const text = await res.text();
+      if (text.includes("<")) return text;
+      throw new Error("Respuesta vacía");
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("No se pudo leer el feed");
+}
+
+function safeUrl(u) {
+  try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ""; }
+  catch { return ""; }
+}
+
+function textOf(el, sel) {
+  const n = el.querySelector(sel);
+  return n ? n.textContent.trim() : "";
+}
+
+function stripHtml(html) {
+  const d = new DOMParser().parseFromString(html || "", "text/html");
+  return (d.body.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+// Igual que stripHtml, pero conserva los saltos de línea de los párrafos (útil para Mastodon).
+function htmlToText(html) {
+  const prepared = (html || "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>\s*<p>/gi, "\n\n");
+  const d = new DOMParser().parseFromString(prepared, "text/html");
+  return (d.body.textContent || "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function parseFeed(xml, fallbackName) {
+  const doc = new DOMParser().parseFromString(xml, "text/xml");
+  if (doc.querySelector("parsererror")) throw new Error("XML inválido");
+  const isAtom = !!doc.querySelector("feed > entry");
+  const source = textOf(doc, isAtom ? "feed > title" : "channel > title") || fallbackName;
+  const nodes = [...doc.querySelectorAll(isAtom ? "entry" : "item")];
+
+  return nodes.map(n => {
+    let link = "";
+    if (isAtom) {
+      const l = n.querySelector('link[rel="alternate"]') || n.querySelector("link");
+      link = l ? l.getAttribute("href") : "";
+    } else {
+      link = textOf(n, "link");
+    }
+    const dateStr = textOf(n, "pubDate") || textOf(n, "published") || textOf(n, "updated") || textOf(n, "date");
+    const date = dateStr ? new Date(dateStr) : null;
+    const title = textOf(n, "title");
+    const safeLink = safeUrl(link);
+    const body = textOf(n, "description") || textOf(n, "summary") || textOf(n, "content");
+    const base = {
+      link: safeLink,
+      date: date && !isNaN(date) ? date : null,
+      source
+    };
+    if (!title) {
+      // Publicaciones tipo Mastodon: no traen título, solo el texto del mensaje.
+      const m = safeLink.match(/\/(@[^/]+)\//);
+      let text = htmlToText(body);
+      if (text.length > CONFIG.maxChars) text = text.slice(0, CONFIG.maxChars).trimEnd() + "…";
+      return { ...base, isPost: true, author: m ? m[1] : source, text };
+    }
+    return { ...base, title, snippet: stripHtml(body).slice(0, 220) };
+  });
+}
+
+async function loadAll() {
+  const results = await Promise.allSettled(
+    CONFIG.feeds.map(async url => parseFeed(await fetchText(url), new URL(url).hostname))
+  );
+  const items = results.filter(r => r.status === "fulfilled").flatMap(r => r.value);
+  const failed = results.filter(r => r.status === "rejected").length;
+  if (!items.length) throw new Error("No se pudo leer ningún feed");
+  items.sort((a, b) => (b.date || 0) - (a.date || 0));
+  return { items: items.slice(0, CONFIG.maxItems), failed };
+}
+
+/* ============ PINTAR ============ */
+const fmt = new Intl.DateTimeFormat("es-MX", { dateStyle: "medium", timeStyle: "short" });
+
+function buildList(items, hidden) {
+  const ul = document.createElement("ul");
+  if (hidden) ul.setAttribute("aria-hidden", "true");
+  for (const it of items) {
+    const li = document.createElement("li");
+    if (it.isPost) {
+      const head = document.createElement("div");
+      head.className = "post-head";
+      const au = document.createElement(it.link ? "a" : "span");
+      au.textContent = it.author;
+      if (it.link) {
+        au.href = it.link; au.target = "_blank"; au.rel = "noopener noreferrer";
+        if (hidden) au.tabIndex = -1;
+      }
+      head.appendChild(au);
+      if (it.date) {
+        const t = document.createElement("time");
+        t.dateTime = it.date.toISOString();
+        t.textContent = fmt.format(it.date);
+        head.appendChild(t);
+      }
+      const body = document.createElement("p");
+      body.className = "post-body";
+      body.textContent = it.text;
+      li.append(head, body);
+      ul.appendChild(li);
+      continue;
+    }
+    const a = document.createElement(it.link ? "a" : "span");
+    a.textContent = it.title;
+    if (it.link) {
+      a.href = it.link; a.target = "_blank"; a.rel = "noopener noreferrer";
+      if (hidden) a.tabIndex = -1;
+    }
+    li.appendChild(a);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = [it.source, it.date ? fmt.format(it.date) : ""].filter(Boolean).join(" · ");
+    li.appendChild(meta);
+
+    if (CONFIG.showSnippet && it.snippet) {
+      const p = document.createElement("p");
+      p.className = "snippet";
+      p.textContent = it.snippet;
+      li.appendChild(p);
+    }
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function render(items) {
+  track.replaceChildren();
+  offset = 0;
+  track.style.transform = "";
+  const list = buildList(items, false);
+  track.appendChild(list);
+
+  const scrolls = CONFIG.scrollSpeed > 0 && !reduceMotion;
+  viewport.classList.toggle("static", !scrolls);
+  if (!scrolls) return;
+
+  listHeight = list.offsetHeight;
+  if (listHeight > viewport.clientHeight) {
+    // Se duplica la lista para que el desplazamiento no tenga saltos.
+    track.appendChild(buildList(items, true));
+  } else {
+    listHeight = 0; // cabe completa: no hace falta desplazar
+  }
+}
+
+function setStatus(kind, text) {
+  $("dot").className = "dot " + kind;
+  $("status").textContent = text;
+}
+
+function showMessage(title, detail) {
+  track.replaceChildren();
+  const d = document.createElement("div");
+  d.className = "message";
+  const s = document.createElement("strong");
+  s.textContent = title;
+  d.append(s, detail);
+  track.appendChild(d);
+  listHeight = 0;
+}
+
+async function update() {
+  setStatus("", "Actualizando…");
+  try {
+    const { items, failed } = await loadAll();
+    render(items);
+    const hora = new Intl.DateTimeFormat("es-MX", { timeStyle: "short" }).format(new Date());
+    setStatus("live", "Actualizado " + hora + (failed ? ` (${failed} feed con error)` : ""));
+  } catch (e) {
+    if (!track.children.length || track.querySelector(".message")) {
+      showMessage("No se pudo cargar el contenido", "Revisa la dirección del feed o tu conexión. Se reintentará automáticamente.");
+    }
+    setStatus("error", "Sin conexión con el feed");
+  }
+}
+
+/* ============ DESPLAZAMIENTO CONTINUO ============ */
+function tick(ts) {
+  if (lastTs && listHeight && !userPaused && !hoverPaused) {
+    offset += CONFIG.scrollSpeed * (ts - lastTs) / 1000;
+    if (offset >= listHeight) offset -= listHeight;
+    track.style.transform = "translateY(" + (-offset) + "px)";
+  }
+  lastTs = ts;
+  requestAnimationFrame(tick);
+}
+
+viewport.addEventListener("mouseenter", () => hoverPaused = true);
+viewport.addEventListener("mouseleave", () => hoverPaused = false);
+viewport.addEventListener("focusin", () => hoverPaused = true);
+viewport.addEventListener("focusout", () => hoverPaused = false);
+
+$("pause").addEventListener("click", e => {
+  userPaused = !userPaused;
+  e.currentTarget.textContent = userPaused ? "Reanudar" : "Pausar";
+  e.currentTarget.setAttribute("aria-pressed", String(userPaused));
+});
+$("refresh").addEventListener("click", update);
+
+document.addEventListener("visibilitychange", () => { if (!document.hidden) lastTs = 0; });
+
+/* ============ ARRANQUE ============ */
+update();
+timer = setInterval(update, CONFIG.refreshMinutes * 60 * 1000);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
